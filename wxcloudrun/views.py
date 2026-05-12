@@ -221,6 +221,31 @@ def cleanup_old_chats(days=30):
             conn.close()
 
 
+def search_chat_history(openid, keyword, limit=20):
+    """搜索该用户的历史聊天记录（超出记忆轮数范围的也能搜到）"""
+    conn = get_db()
+    if not conn:
+        return []
+    try:
+        cursor = conn.cursor(pymysql.cursors.DictCursor)
+        cursor.execute(
+            "SELECT role, content, created_at FROM ai_chat_logs "
+            "WHERE openid = %s AND content LIKE %s "
+            "ORDER BY created_at DESC LIMIT %s",
+            (openid, f"%{keyword}%", limit)
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        rows.reverse()  # 时间正序
+        return rows
+    except Exception as e:
+        logger.error(f"搜索历史对话失败: {e}")
+        if conn:
+            conn.close()
+        return []
+
+
 def create_repair_order(openid, customer_name, customer_phone, brand, model,
                         fault_description, serial_number=None, company=None):
     """创建维修工单"""
@@ -341,6 +366,8 @@ SYSTEM_PROMPT = """你是匠测科技（JCETech）的 AI 客服助手，名叫 R
 **联系方式：**
 - 李工：15757807400
 - 官网：https://jcetech.cn
+
+**高级能力：** 如果你看到用户提及之前聊过的事情，但当前历史中找不到相关信息，可以使用 `[SEARCH_HISTORY:关键词]` 标记。我会自动去数据库搜索该用户的全部历史记录，然后带着结果重新回答你。例如：用户问"上次那个OMP40的报价出来了吗"，你可以回复 `[SEARCH_HISTORY:OMP40 报价]`。
 
 用中文回复，语气专业但友好。"""
 
@@ -504,6 +531,44 @@ def process_with_ai(user_message, openid):
         except Exception as e:
             logger.error(f"解析查单号请求失败: {e}")
             return "查询失败，请稍后再试。"
+
+    # ---- 翻历史：AI 想不起来时主动去数据库搜索 ----
+    search_marker = "[SEARCH_HISTORY:"
+    if search_marker in reply:
+        try:
+            keyword = reply.split(search_marker, 1)[1].split("]", 1)[0].strip()
+            logger.info(f"AI 触发翻历史: 关键词={keyword}")
+            found = search_chat_history(openid, keyword, limit=15)
+            if found:
+                context_lines = ["以下是该用户更早的历史对话记录，请参考："]
+                for f in found:
+                    who = "用户" if f["role"] == "user" else "客服"
+                    context_lines.append(f"[{who}] {f['content'][:200]}")
+                context_str = "\n".join(context_lines)
+
+                # 重新调用 AI，带上搜索到的历史
+                history = get_recent_chats(openid, limit=CHAT_HISTORY_ROUNDS * 2)
+                re_messages = [
+                    {"role": "system", "content": SYSTEM_PROMPT}
+                ]
+                for h in history:
+                    if h["role"] in ("user", "assistant"):
+                        re_messages.append({"role": h["role"], "content": h["content"]})
+                # 把搜索结果作为额外上下文注入
+                re_messages.append({"role": "system", "content": context_str})
+                re_messages.append({"role": "user", "content": user_message})
+
+                re_reply = call_deepseek(re_messages)
+                if re_reply:
+                    reply = re_reply
+                # 如果重新调用失败，去掉标记直接返回原文
+                else:
+                    reply = reply.replace(f"{search_marker}{keyword}]", "").strip()
+            else:
+                reply = reply.replace(f"{search_marker}{keyword}]",
+                                      f"（关于「{keyword}」，在您的历史记录中没有找到相关信息）")
+        except Exception as e:
+            logger.error(f"翻历史处理失败: {e}")
 
     return reply
 
