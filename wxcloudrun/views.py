@@ -494,9 +494,21 @@ def process_with_ai(user_message, openid):
             )
             system_content = SYSTEM_PROMPT + abuse_note
 
-    # 构建消息列表：system prompt + 历史对话 + 当前消息
+    # 查询用户角色并注入身份信息
+    user_role = get_user_role(openid)
+    role_context_parts = [f"当前用户OpenID: {openid}"]
+    if user_role:
+        type_label = {"admin": '管理员"先生/哲豪"', "engineer": "工程师", "customer": "客户"}.get(user_role, "客户")
+        role_context_parts.append(f"用户角色: {type_label}")
+        if user_role == "admin":
+            role_context_parts.append('这是老板/先生/哲豪，匠测科技创始人。要称呼"先生"或"哲豪"，语气可轻松一些')
+
+    role_context = " | ".join(role_context_parts)
+
+    # 构建消息列表：system prompt + 角色身份 + 历史对话 + 当前消息
     messages = [
         {"role": "system", "content": system_content},
+        {"role": "system", "content": role_context},
     ]
 
     # 注入历史对话（注意：openid对应的role在history里是user/assistant）
