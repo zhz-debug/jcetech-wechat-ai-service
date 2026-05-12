@@ -22,6 +22,7 @@ import os
 import sys
 import re
 import subprocess
+import threading
 
 import pymysql
 import requests
@@ -738,6 +739,49 @@ def process_with_ai(user_message, openid, timeout=30, return_none_on_error=False
 
 
 # ============================================================
+# 后台AI线程
+# ============================================================
+
+def _background_ai_reply(openid, content):
+    """后台线程：调用DeepSeek（30秒超时）并推送客服消息"""
+    try:
+        logger.info(f"后台AI线程开始: openid={openid[:20]}... msg={content[:50]}")
+        reply = process_with_ai(content, openid, timeout=30, return_none_on_error=True)
+
+        if not reply:
+            logger.warning(f"后台AI线程返回空: openid={openid[:20]}...")
+            return
+
+        # 更新数据库中的占位记录
+        conn = get_db()
+        if conn:
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE ai_chat_logs SET content=%s WHERE openid=%s "
+                    "AND role='assistant' AND content LIKE '🔍 正在分析%' "
+                    "ORDER BY id DESC LIMIT 1",
+                    (reply, openid)
+                )
+                conn.commit()
+                cursor.close()
+                conn.close()
+            except Exception as e:
+                logger.error(f"后台AI线程更新DB失败: {e}")
+                try:
+                    conn.close()
+                except:
+                    pass
+
+        # 通过客服消息API推送
+        success = push_custom_message(openid, reply)
+        logger.info(f"后台AI线程推送{'成功' if success else '失败'}: "
+                     f"openid={openid[:20]}... 回复={reply[:80]}...")
+    except Exception as e:
+        logger.error(f"后台AI线程异常: {e}", exc_info=True)
+
+
+# ============================================================
 # 路由
 # ============================================================
 
@@ -1052,17 +1096,13 @@ def wechat():
     save_chat_log(from_user, "assistant", hold_reply)
     xml = build_xml_reply(from_user, to_user, hold_reply)
 
-    # 后台独立进程调用DeepSeek（不受gunicorn worker生命周期影响）
-    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "background_ai.py")
-    if os.path.exists(script_path):
-        try:
-            subprocess.Popen(
-                [sys.executable, script_path, from_user, content],
-                stdout=open("/tmp/background_ai_stdout.log", "a"),
-                stderr=open("/tmp/background_ai_stderr.log", "a")
-            )
-        except Exception as e:
-            logger.error(f"启动后台AI进程失败: {e}")
+    # 后台线程：调用DeepSeek并通过客服消息API推送（minNum=1常驻容器内安全运行）
+    try:
+        t = threading.Thread(target=_background_ai_reply, args=(from_user, content))
+        t.daemon = False  # 非守护线程：即使主请求结束，线程继续运行
+        t.start()
+    except Exception as e:
+        logger.error(f"启动后台AI线程失败: {e}")
 
     return make_response(xml, 200,
                          {"Content-Type": "application/xml; charset=utf-8"})
