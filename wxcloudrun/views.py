@@ -806,7 +806,7 @@ def _background_ai_reply(openid, content):
                 cursor = conn.cursor()
                 cursor.execute(
                     "UPDATE ai_chat_logs SET content=%s WHERE openid=%s "
-                    "AND role='assistant' AND content LIKE '🔍 正在分析%' "
+                    "AND role='assistant' AND content LIKE '🔍 正在分析%%' "
                     "ORDER BY id DESC LIMIT 1",
                     (reply, openid)
                 )

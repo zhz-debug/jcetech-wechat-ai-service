@@ -1,11 +1,16 @@
 # 基于 Debian slim 的 Python 镜像，更稳定
 FROM python:3.11-slim
 
-# 设置上海时区
-RUN apt-get update && apt-get install -y --no-install-recommends tzdata ca-certificates \
+# 设置上海时区 + 安装CA证书（必须完整安装，否则SSL验证失败）
+RUN apt-get update && apt-get install -y tzdata ca-certificates openssl \
     && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
     && echo Asia/Shanghai > /etc/timezone \
+    && update-ca-certificates --fresh \
     && rm -rf /var/lib/apt/lists/*
+
+# 确保SSL证书环境变量正确
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 
 # 拷贝项目到/app目录
 COPY . /app
