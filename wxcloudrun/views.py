@@ -548,8 +548,9 @@ def call_deepseek(messages, timeout=30):
         return None
 
 
-def process_with_ai(user_message, openid, timeout=30):
-    """用 AI 处理用户消息，返回回复文本（支持自定义超时，用于轮询）"""
+def process_with_ai(user_message, openid, timeout=30, return_none_on_error=False):
+    """用 AI 处理用户消息，返回回复文本（支持自定义超时，用于轮询）
+    当 return_none_on_error=True 时，超时/失败返回 None 而非备胎文案"""
     history_count = CHAT_HISTORY_ROUNDS * 2
     history = get_recent_chats(openid, limit=history_count)
 
@@ -599,6 +600,8 @@ def process_with_ai(user_message, openid, timeout=30):
 
     reply = call_deepseek(messages, timeout=timeout)
     if not reply:
+        if return_none_on_error:
+            return None
         return ("抱歉，我现在有点忙不过来，请稍后再试。"
                 "如需紧急帮助，请联系李工：15757807400")
 
@@ -1044,8 +1047,9 @@ def wechat():
             max_retries = 10
             for attempt in range(1, max_retries + 1):
                 # 快速尝试DeepSeek（3秒超时，超时则下一轮继续）
-                reply = process_with_ai(msg, openid, timeout=3)
-                if reply:
+                # return_none_on_error 避免把"忙不过来"备胎当真实回复推送
+                reply = process_with_ai(msg, openid, timeout=3, return_none_on_error=True)
+                if reply is not None:
                     # 成功了！推送最终答案
                     push_custom_message(openid, reply)
                     # 更新数据库占位记录
