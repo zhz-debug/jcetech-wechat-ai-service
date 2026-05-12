@@ -1058,8 +1058,8 @@ def wechat():
         try:
             subprocess.Popen(
                 [sys.executable, script_path, from_user, content],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
+                stdout=open("/tmp/background_ai_stdout.log", "a"),
+                stderr=open("/tmp/background_ai_stderr.log", "a")
             )
         except Exception as e:
             logger.error(f"启动后台AI进程失败: {e}")
