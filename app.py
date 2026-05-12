@@ -108,6 +108,122 @@ def get_db():
         return None
 
 
+def get_wechat_user(openid):
+    """根据OpenID查询微信用户信息"""
+    conn = get_db()
+    if not conn:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT openid, phone, user_type, nickname, company_name, keep_history "
+                "FROM wechat_users WHERE openid = %s", (openid,)
+            )
+            row = cur.fetchone()
+            return row
+    except Exception as e:
+        logger.error(f"查询用户失败: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def query_wechat_user_by_phone(phone):
+    """根据手机号查询微信用户"""
+    conn = get_db()
+    if not conn:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT openid, phone, user_type, nickname, company_name "
+                "FROM wechat_users WHERE phone = %s LIMIT 1", (phone,)
+            )
+            row = cur.fetchone()
+            return row
+    except Exception as e:
+        logger.error(f"按手机号查询用户失败: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def upsert_wechat_user(openid, phone=None, user_type=None, nickname=None, company_name=None):
+    """创建或更新微信用户信息"""
+    conn = get_db()
+    if not conn:
+        return False
+    try:
+        with conn.cursor() as cur:
+            # 先查是否存在
+            cur.execute("SELECT id FROM wechat_users WHERE openid = %s", (openid,))
+            exists = cur.fetchone()
+            if exists:
+                updates = []
+                params = []
+                if phone is not None:
+                    updates.append("phone = %s")
+                    params.append(phone)
+                if user_type is not None:
+                    updates.append("user_type = %s")
+                    params.append(user_type)
+                if nickname is not None:
+                    updates.append("nickname = %s")
+                    params.append(nickname)
+                if company_name is not None:
+                    updates.append("company_name = %s")
+                    params.append(company_name)
+                if updates:
+                    params.append(openid)
+                    cur.execute(f"UPDATE wechat_users SET {', '.join(updates)} WHERE openid = %s", params)
+            else:
+                cur.execute(
+                    "INSERT INTO wechat_users (openid, phone, user_type, nickname, company_name) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (openid, phone or "", user_type or "customer", nickname or "", company_name or "")
+                )
+            conn.commit()
+            return True
+    except Exception as e:
+        logger.error(f"更新用户失败: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+
+ADMIN_OPENID = "omSRr243pGE1j-gAzWOrWhBDQoGg"
+
+
+def handle_set_role_command(openid, content):
+    """处理管理员设置角色/电话指令"""
+    if openid != ADMIN_OPENID:
+        return None  # 非管理员不处理
+    # 格式: 设置角色 [openid或手机号] admin/engineer/customer
+    match = re.match(r'设置角色\s+(\S+)\s+(admin|engineer|customer)', content)
+    if match:
+        target = match.group(1)
+        role = match.group(2)
+        # 判断目标是openid还是手机号
+        if re.match(r'^1[3-9]\d{9}$', target):
+            user = query_wechat_user_by_phone(target)
+            if user:
+                upsert_wechat_user(user[0], user_type=role)
+                return f"已将手机号 {target[:3]}****{target[-4:]} 的角色设为 [{role}]"
+            else:
+                return f"未找到手机号 {target} 对应的微信用户"
+        else:
+            upsert_wechat_user(target, user_type=role)
+            return f"已将OpenID {target[:10]}... 的角色设为 [{role}]"
+    # 格式: 绑定电话 [手机号]
+    match = re.match(r'绑定电话\s+(1[3-9]\d{9})', content)
+    if match:
+        phone = match.group(1)
+        upsert_wechat_user(openid, phone=phone)
+        return f"已绑定手机号 {phone[:3]}****{phone[-4:]}"
+    return None
+
+
 def create_repair_order(openid, customer_name, customer_phone, brand, model,
                         fault_description, serial_number=None, company=None):
     """创建维修工单"""
@@ -244,12 +360,6 @@ SYSTEM_PROMPT = """你是匠测科技（JCETech）的 AI 客服助手，名叫 R
 **价格说明：** Rex不负责报价。客户问价格时，统一回复"需要收到设备检测后才能确定报价"。
 - 检测费用由工程师根据具体故障情况评估
 
-**管理员识别（必记）：**
-- 管理员OpenID: **omSRr243pGE1j-gAzWOrWhBDQoGg**
-- 这位是老板/先生/哲豪/张哲豪，匠测科技创始人
-- 管理员问"你知道我是谁吗"时，回答"您是哲豪/先生，匠测科技的创始人，我怎么会不记得您" 并主动问需要什么帮助
-- 对管理员的请求优先处理，语气可略轻松
-
 **联系方式：**
 - 李工：15757807400（24小时）
 - 地址：宁波研发园A区
@@ -286,8 +396,31 @@ def call_deepseek(messages):
 
 def process_with_ai(user_message, openid):
     """用 AI 处理用户消息，返回回复文本"""
-    # 注入用户身份信息，让AI知道谁在说话
-    identity_context = f"当前用户OpenID: {openid}"
+    # 先检查管理员指令
+    admin_reply = handle_set_role_command(openid, user_message)
+    if admin_reply:
+        return admin_reply
+
+    # 查询用户身份信息
+    user_info = get_wechat_user(openid)
+    user_desc_parts = [f"当前用户OpenID: {openid}"]
+    if user_info:
+        phone = user_info[2]  # phone
+        user_type = user_info[3] or "customer"   # user_type
+        nickname = user_info[4] or ""     # nickname
+        company = user_info[5] or ""      # company_name
+        type_label = {"admin": "管理员(老板/先生)", "engineer": "工程师", "customer": "客户"}.get(user_type, "客户")
+        user_desc_parts.append(f"用户角色: {type_label}")
+        if phone:
+            user_desc_parts.append(f"绑定手机: {phone[:3]}****{phone[-4:]}")
+        if nickname:
+            user_desc_parts.append(f"昵称: {nickname}")
+        if company:
+            user_desc_parts.append(f"公司: {company}")
+        if user_type == "admin":
+            user_desc_parts.append('注意：这是管理员，要称呼"先生"或"哲豪"，语气可轻松一些')
+
+    identity_context = " | ".join(user_desc_parts)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "system", "content": identity_context},
