@@ -1,29 +1,23 @@
-# 选择基础镜像
-FROM alpine:3.20
+# 基于 Debian slim 的 Python 镜像，更稳定
+FROM python:3.11-slim
 
 # 设置上海时区
-RUN apk add tzdata && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && echo Asia/Shanghai > /etc/timezone
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata ca-certificates \
+    && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && echo Asia/Shanghai > /etc/timezone \
+    && rm -rf /var/lib/apt/lists/*
 
-# 使用 HTTPS 协议访问容器云调用证书安装
-RUN apk add ca-certificates
-
-# 安装依赖包，选用国内镜像源以提高下载速度
-RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.tencent.com/g' /etc/apk/repositories \
-    && apk add --update --no-cache python3 py3-pip \
-    && rm -rf /var/cache/apk/*
-
-# 拷贝当前项目到/app目录下
+# 拷贝项目到/app目录
 COPY . /app
 
-# 设定当前的工作目录
+# 设定工作目录
 WORKDIR /app
 
-# 安装依赖到指定的/install文件夹
-# 选用国内镜像源以提高下载速度
+# 安装依赖（使用腾讯云镜像加速）
 RUN pip config set global.index-url http://mirrors.cloud.tencent.com/pypi/simple \
     && pip config set global.trusted-host mirrors.cloud.tencent.com \
     && pip install --upgrade pip \
-    && pip install --user -r requirements.txt
+    && pip install -r requirements.txt
 
 # 暴露端口（需与云托管服务设置一致）
 EXPOSE 80
