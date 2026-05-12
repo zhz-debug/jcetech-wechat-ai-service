@@ -20,3 +20,9 @@ DB_NAME = os.environ.get("DB_NAME", "jcetech")
 
 # 白名单（逗号分隔，留空则全放开）
 ALLOWED_USERS = os.environ.get("ALLOWED_USERS", "")
+
+# 历史聊天记录追忆轮数（每轮=用户1条+AI1条，留空默认15轮）
+CHAT_HISTORY_ROUNDS = int(os.environ.get("CHAT_HISTORY_ROUNDS", "25"))
+
+# 滥用检测：连续多少条非工作消息触发提醒（0=关闭）
+ABUSE_TRIGGER_COUNT = int(os.environ.get("ABUSE_TRIGGER_COUNT", "10"))

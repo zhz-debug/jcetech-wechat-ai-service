@@ -46,6 +46,12 @@ DB_NAME = app.config.get("DB_NAME") or "jcetech"
 ALLOWED_USERS_RAW = app.config.get("ALLOWED_USERS") or ""
 ALLOWED_USERS = [u.strip() for u in ALLOWED_USERS_RAW.split(",") if u.strip()]
 
+# 历史对话轮数（user+assistant 算一轮，默认 25 轮 = 50 条消息）
+CHAT_HISTORY_ROUNDS = int(app.config.get("CHAT_HISTORY_ROUNDS") or 25)
+
+# 滥用检测：连续 N 条非工作消息触发提醒（0=关闭）
+ABUSE_TRIGGER_COUNT = int(app.config.get("ABUSE_TRIGGER_COUNT") or 10)
+
 # ============================================================
 # 日志
 # ============================================================
@@ -370,12 +376,32 @@ def call_deepseek(messages):
 
 def process_with_ai(user_message, openid):
     """用 AI 处理用户消息，返回回复文本"""
-    # 获取历史对话（最近8条）
-    history = get_recent_chats(openid, limit=8)
+    history_count = CHAT_HISTORY_ROUNDS * 2
+    history = get_recent_chats(openid, limit=history_count)
+
+    # 滥用检测：检查最近消息是否非工作闲聊
+    system_content = SYSTEM_PROMPT
+    if ABUSE_TRIGGER_COUNT > 0:
+        # 从历史中提取最近用户的消息内容（仅 user 角色）
+        user_msgs_in_history = [
+            h["content"] for h in history if h["role"] == "user"
+        ]
+        # 只看最近的消息（最新的在后面，所以取最后 N 条）
+        recent_user_msgs = user_msgs_in_history[-ABUSE_TRIGGER_COUNT:]
+
+        if len(recent_user_msgs) >= ABUSE_TRIGGER_COUNT:
+            # 让 AI 自己判断是否是非工作闲聊
+            abuse_note = (
+                f"\n\n**注意：** 该用户最近 {ABUSE_TRIGGER_COUNT} 条消息均未涉及精密测量、"
+                f"设备维修、品牌型号、报价等业务相关内容。如果确实如此，请礼貌提醒用户："
+                f"你现在在工作时间，只能提供精密检测相关的技术服务，"
+                f"不太方便聊与工作无关的话题。"
+            )
+            system_content = SYSTEM_PROMPT + abuse_note
 
     # 构建消息列表：system prompt + 历史对话 + 当前消息
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_content},
     ]
 
     # 注入历史对话（注意：openid对应的role在history里是user/assistant）
