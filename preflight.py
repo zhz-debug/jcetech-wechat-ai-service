@@ -90,7 +90,8 @@ else:
 
 checks_map = [
     ("客服消息推送接口", "push_custom_message"),
-    ("轮询回复机制", "poll_ai_reply"),
+    ("后台单次AI调用(30s)", "background_ai"),
+    ("快速调用(4s优先)", "fast_reply = process_with_ai"),
     ("轮询超时空值保护", "return_none_on_error"),
     ("品牌中立定位声明", "第三方技术服务商"),
     ("对比免责声明", "未经验证"),

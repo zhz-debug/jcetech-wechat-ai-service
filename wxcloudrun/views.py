@@ -1035,67 +1035,35 @@ def wechat():
         return make_response(xml, 200,
                              {"Content-Type": "application/xml; charset=utf-8"})
 
-    # ---- AI 智能回复（轮询推送） ----
-    # 先秒回占位消息，避免微信5秒超时断开
+    # ---- AI 智能回复（快速+后台双轨） ----
+    # 先尝试4秒快速调用（微信5秒窗口内）
+    fast_reply = process_with_ai(content, from_user, timeout=4)
+    if fast_reply:
+        # 4秒内出结果了，直接同步返回
+        save_chat_log(from_user, "assistant", fast_reply)
+        xml = build_xml_reply(from_user, to_user, fast_reply)
+        return make_response(xml, 200,
+                             {"Content-Type": "application/xml; charset=utf-8"})
+
+    # 超时了：先秒回占位消息
     hold_reply = "🔍 正在分析您的问题，请稍候..."
     save_chat_log(from_user, "assistant", hold_reply)
     xml = build_xml_reply(from_user, to_user, hold_reply)
 
-    # 后台线程：每2.5秒轮询DeepSeek，同时推送keepalive，直到出结果
-    def poll_ai_reply(openid, msg):
+    # 后台单次完整调用DeepSeek（30秒超时），完成后客服消息推送
+    def background_ai(openid, msg):
         try:
-            max_retries = 10
-            for attempt in range(1, max_retries + 1):
-                # 快速尝试DeepSeek（3秒超时，超时则下一轮继续）
-                # return_none_on_error 避免把"忙不过来"备胎当真实回复推送
-                reply = process_with_ai(msg, openid, timeout=3, return_none_on_error=True)
-                if reply is not None:
-                    # 成功了！推送最终答案
-                    push_custom_message(openid, reply)
-                    # 更新数据库占位记录
-                    conn = get_db()
-                    if conn:
-                        try:
-                            cursor = conn.cursor()
-                            cursor.execute(
-                                "UPDATE ai_chat_logs SET content = %s "
-                                "WHERE openid = %s AND role = 'assistant' "
-                                "AND content = '🔍 正在分析您的问题，请稍候...' "
-                                "ORDER BY id DESC LIMIT 1",
-                                (reply, openid)
-                            )
-                            conn.commit()
-                            cursor.close()
-                        except Exception as e:
-                            logger.error(f"更新回复记录失败: {e}")
-                        finally:
-                            conn.close()
-                    return
-                else:
-                    # 没出结果，发keepalive
-                    if attempt <= 5:
-                        msg_text = "⏳ 正在分析您的问题，请稍候..."
-                    elif attempt <= 8:
-                        msg_text = "⏳ 问题较复杂，我再分析一会..."
-                    else:
-                        msg_text = "⏳ 快好了，再等一下..."
-                    push_custom_message(openid, msg_text)
-                    time.sleep(2.5)
-            # 所有重试用完仍失败
-            push_custom_message(openid, "抱歉，AI暂时无法回复，请联系李工：15757807400")
+            reply = process_with_ai(msg, openid, timeout=30)
+            if reply:
+                push_custom_message(openid, reply)
+            else:
+                push_custom_message(openid, "抱歉，AI暂时无法回复，请联系李工：15757807400")
         except Exception as e:
-            logger.error(f"轮询AI回复异常: {e}")
-            try:
-                push_custom_message(openid, "抱歉，处理异常，请联系李工：15757807400")
-            except:
-                pass
+            logger.error(f"后台AI回复异常: {e}")
 
-    thread = threading.Thread(
-        target=poll_ai_reply,
-        args=(from_user, content)
-    )
-    thread.daemon = True
-    thread.start()
+    t = threading.Thread(target=background_ai, args=(from_user, content))
+    t.daemon = True
+    t.start()
 
     return make_response(xml, 200,
                          {"Content-Type": "application/xml; charset=utf-8"})

@@ -108,6 +108,111 @@ def get_db():
         return None
 
 
+# ============================================================
+# 对话记忆管理
+# ============================================================
+
+# 不同角色的记忆轮数上限（1轮=1问+1答=2条消息）
+ROLE_MEMORY_LIMITS = {
+    "admin": 50,     # 管理员：50轮（100条）
+    "engineer": 25,  # 工程师：25轮（50条）
+    "customer": 10,  # 客户：10轮（20条）
+}
+
+# 记忆保留天数（keep_history=1 的永久保存）
+MEMORY_RETENTION_DAYS = 30
+
+
+def get_user_memory_limit(openid):
+    """查询用户的记忆轮数上限"""
+    user = get_wechat_user(openid)
+    if not user:
+        return ROLE_MEMORY_LIMITS["customer"]  # 默认10轮
+    user_type = user[2] or "customer"
+    keep_history = user[5]
+    if keep_history == 1:
+        return 9999  # 永久保存，不限制
+    return ROLE_MEMORY_LIMITS.get(user_type, ROLE_MEMORY_LIMITS["customer"])
+
+
+def load_chat_history(openid, limit_rounds):
+    """加载用户最近的对话历史，返回消息列表"""
+    max_messages = limit_rounds * 2  # 1轮=2条（user+assistant）
+    conn = get_db()
+    if not conn:
+        return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT role, content FROM ai_chat_logs "
+                "WHERE openid = %s AND role IN ('user','assistant') "
+                "ORDER BY id ASC", (openid,)
+            )
+            rows = cur.fetchall()
+            # 只取最近的 max_messages 条
+            recent = rows[-max_messages:] if len(rows) > max_messages else rows
+            return [{"role": r[0], "content": r[1]} for r in recent]
+    except Exception as e:
+        logger.error(f"加载对话历史失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def save_chat_message(openid, role, content):
+    """保存一条对话记录"""
+    conn = get_db()
+    if not conn:
+        return
+    try:
+        with conn.cursor() as cur:
+            # 先确保用户在 wechat_users 表中有记录
+            cur.execute("SELECT id FROM wechat_users WHERE openid = %s", (openid,))
+            if not cur.fetchone():
+                cur.execute(
+                    "INSERT INTO wechat_users (openid, user_type) VALUES (%s, 'customer') "
+                    "ON DUPLICATE KEY UPDATE openid = openid",
+                    (openid,)
+                )
+            # 保存消息
+            cur.execute(
+                "INSERT INTO ai_chat_logs (openid, role, content) VALUES (%s, %s, %s)",
+                (openid, role, content)
+            )
+            conn.commit()
+    except Exception as e:
+        logger.error(f"保存对话记录失败: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
+
+
+def cleanup_old_chat_logs():
+    """清理30天前的对话记录（keep_history=1除外）"""
+    conn = get_db()
+    if not conn:
+        return
+    try:
+        with conn.cursor() as cur:
+            # 找出所有没有标记永久保存的openid
+            cur.execute(
+                "DELETE FROM ai_chat_logs WHERE created_at < NOW() - INTERVAL %s DAY "
+                "AND openid NOT IN (SELECT openid FROM wechat_users WHERE keep_history = 1)",
+                (MEMORY_RETENTION_DAYS,)
+            )
+            deleted = cur.rowcount
+            conn.commit()
+            if deleted > 0:
+                logger.info(f"已清理 {deleted} 条过期对话记录")
+            return deleted
+    except Exception as e:
+        logger.error(f"清理对话记录失败: {e}")
+        conn.rollback()
+        return 0
+    finally:
+        conn.close()
+
+
 def get_wechat_user(openid):
     """根据OpenID查询微信用户信息"""
     conn = get_db()
@@ -405,10 +510,10 @@ def process_with_ai(user_message, openid):
     user_info = get_wechat_user(openid)
     user_desc_parts = [f"当前用户OpenID: {openid}"]
     if user_info:
-        phone = user_info[2]  # phone
-        user_type = user_info[3] or "customer"   # user_type
-        nickname = user_info[4] or ""     # nickname
-        company = user_info[5] or ""      # company_name
+        phone = user_info[1]         # phone
+        user_type = user_info[2]     # user_type
+        nickname = user_info[3] or ""     # nickname
+        company = user_info[4] or ""      # company_name
         type_label = {"admin": "管理员(老板/先生)", "engineer": "工程师", "customer": "客户"}.get(user_type, "客户")
         user_desc_parts.append(f"用户角色: {type_label}")
         if phone:
@@ -421,11 +526,32 @@ def process_with_ai(user_message, openid):
             user_desc_parts.append('注意：这是管理员，要称呼"先生"或"哲豪"，语气可轻松一些')
 
     identity_context = " | ".join(user_desc_parts)
+    memory_limit = get_user_memory_limit(openid)
+
+    # 加载历史对话
+    history = load_chat_history(openid, memory_limit)
+    memory_note = ""
+    if memory_limit >= 9999:
+        memory_note = "（永久保存）"
+    elif memory_limit > 0:
+        memory_note = f"（最近{memory_limit}轮）"
+    history_msg = f"对话记忆：以下是与该用户的历史对话记录{memory_note}。如果你需要更多上下文，回复 [SEARCH_HISTORY:关键词] 来搜索更早的记录。"
+    if memory_limit > 0 and len(history) == 0:
+        history_msg += "\n（暂无历史记录，这是第一轮对话）"
+
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "system", "content": identity_context},
-        {"role": "user", "content": user_message}
     ]
+    # 注入历史（最多 load_chat_history 已经限制）
+    if history:
+        messages.append({"role": "system", "content": history_msg})
+        messages.extend(history)
+
+    # 保存用户消息
+    save_chat_message(openid, "user", user_message)
+
+    messages.append({"role": "user", "content": user_message})
 
     reply = call_deepseek(messages)
     if not reply:
