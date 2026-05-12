@@ -105,6 +105,116 @@ def get_db():
         return None
 
 
+def ensure_user_exists(openid):
+    """确保用户在 wechat_users 表中有记录"""
+    conn = get_db()
+    if not conn:
+        return
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT IGNORE INTO wechat_users (openid, user_type) VALUES (%s, 'customer')",
+            (openid,)
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"确保用户存在失败: {e}")
+        if conn:
+            conn.close()
+
+
+def get_user_role(openid):
+    """查询用户角色"""
+    conn = get_db()
+    if not conn:
+        return "customer"
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT user_type FROM wechat_users WHERE openid = %s",
+            (openid,)
+        )
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        return row[0] if row else "customer"
+    except Exception as e:
+        logger.error(f"查询角色失败: {e}")
+        if conn:
+            conn.close()
+        return "customer"
+
+
+def save_chat_log(openid, role, content):
+    """保存聊天记录到数据库"""
+    conn = get_db()
+    if not conn:
+        return
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO ai_chat_logs (openid, role, content) VALUES (%s, %s, %s)",
+            (openid, role, content)
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"保存聊天记录失败: {e}")
+
+
+def get_recent_chats(openid, limit=10):
+    """获取最近 N 条聊天记录"""
+    conn = get_db()
+    if not conn:
+        return []
+    try:
+        cursor = conn.cursor(pymysql.cursors.DictCursor)
+        cursor.execute(
+            "SELECT role, content FROM ai_chat_logs "
+            "WHERE openid = %s ORDER BY created_at DESC LIMIT %s",
+            (openid, limit)
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        rows.reverse()  # 时间正序
+        return rows
+    except Exception as e:
+        logger.error(f"获取聊天记录失败: {e}")
+        if conn:
+            conn.close()
+        return []
+
+
+def cleanup_old_chats(days=30):
+    """清理超过天数的聊天记录（保留标记了 keep_history 的用户）"""
+    conn = get_db()
+    if not conn:
+        return
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            DELETE FROM ai_chat_logs
+            WHERE created_at < NOW() - INTERVAL %s DAY
+              AND openid NOT IN (
+                  SELECT openid FROM wechat_users WHERE keep_history = 1
+              )
+        """, (days,))
+        deleted = cursor.rowcount
+        conn.commit()
+        cursor.close()
+        conn.close()
+        if deleted > 0:
+            logger.info(f"清理了 {deleted} 条过期聊天记录")
+    except Exception as e:
+        logger.error(f"清理聊天记录失败: {e}")
+        if conn:
+            conn.close()
+
+
 def create_repair_order(openid, customer_name, customer_phone, brand, model,
                         fault_description, serial_number=None, company=None):
     """创建维修工单"""
@@ -260,10 +370,20 @@ def call_deepseek(messages):
 
 def process_with_ai(user_message, openid):
     """用 AI 处理用户消息，返回回复文本"""
+    # 获取历史对话（最近8条）
+    history = get_recent_chats(openid, limit=8)
+
+    # 构建消息列表：system prompt + 历史对话 + 当前消息
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_message}
     ]
+
+    # 注入历史对话（注意：openid对应的role在history里是user/assistant）
+    for h in history:
+        if h["role"] in ("user", "assistant"):
+            messages.append({"role": h["role"], "content": h["content"]})
+
+    messages.append({"role": "user", "content": user_message})
 
     reply = call_deepseek(messages)
     if not reply:
@@ -470,9 +590,17 @@ def wechat():
     if ALLOWED_USERS and from_user not in ALLOWED_USERS:
         reply = ("您好，匠测科技 AI 客服正在升级中，"
                  "如需报修请联系李工：15757807400")
+        save_chat_log(from_user, "user", content)
+        save_chat_log(from_user, "assistant", reply)
         xml = build_xml_reply(from_user, to_user, reply)
         return make_response(xml, 200,
                              {"Content-Type": "application/xml; charset=utf-8"})
+
+    # 确保用户在 wechat_users 表中有记录
+    ensure_user_exists(from_user)
+
+    # 保存用户消息到聊天记录
+    save_chat_log(from_user, "user", content)
 
     # ---- 查进度关键词 ----
     c = content.strip()
@@ -506,8 +634,110 @@ def wechat():
         return make_response(xml, 200,
                              {"Content-Type": "application/xml; charset=utf-8"})
 
+    # ---- 指令：我的信息 ----
+    if c in ("我的信息", "我的信息。"):
+        role = get_user_role(from_user)
+        role_name = {"admin": "管理员", "engineer": "工程师", "boss": "老板", "customer": "普通用户"}.get(role, "普通用户")
+        if role == "customer":
+            reply = (
+                f"📱 您的微信信息\n"
+                f"━━━━━━━━━━━━━━━━\n\n"
+                f"OpenID：{from_user}\n"
+                f"角色：{role_name}\n\n"
+                f"如需设置权限，请联系管理员。"
+            )
+        else:
+            reply = (
+                f"📱 您的微信信息\n"
+                f"━━━━━━━━━━━━━━━━\n\n"
+                f"OpenID：{from_user}\n"
+                f"角色：{role_name} ✅\n"
+                f"您有管理权限。"
+            )
+        save_chat_log(from_user, "assistant", reply)
+        xml = build_xml_reply(from_user, to_user, reply)
+        return make_response(xml, 200,
+                             {"Content-Type": "application/xml; charset=utf-8"})
+
+    # ---- 管理员指令 ----
+    role = get_user_role(from_user)
+    is_admin_boss = role in ("admin", "boss")
+
+    # 设置角色
+    set_match = re.match(r'^设置(老板|工程师)\s*(1[3-9]\d{9})$', c)
+    if set_match:
+        if not is_admin_boss:
+            reply = "抱歉，只有管理员和老板才能设置角色。"
+        else:
+            target_role = set_match.group(1)
+            phone = set_match.group(2)
+            db_type = "boss" if target_role == "老板" else "engineer"
+            conn = get_db()
+            if conn:
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "UPDATE wechat_users SET user_type = %s WHERE phone = %s",
+                        (db_type, phone)
+                    )
+                    affected = cursor.rowcount
+                    conn.commit()
+                    cursor.close()
+                    conn.close()
+                    if affected > 0:
+                        reply = f"✅ 已将手机号 {phone[:3]}****{phone[-4:]} 设置为【{target_role}】"
+                    else:
+                        reply = f"❌ 未找到手机号 {phone} 的微信用户，请确保该用户已关注公众号并发送过消息。"
+                except Exception as e:
+                    logger.error(f"设置角色失败: {e}")
+                    reply = "设置失败，请稍后再试。"
+            else:
+                reply = "数据库连接失败，请稍后再试。"
+        save_chat_log(from_user, "assistant", reply)
+        xml = build_xml_reply(from_user, to_user, reply)
+        return make_response(xml, 200,
+                             {"Content-Type": "application/xml; charset=utf-8"})
+
+    # 权限列表
+    if c in ("权限列表", "角色列表"):
+        if not is_admin_boss:
+            reply = "抱歉，只有管理员和老板才能查看。"
+        else:
+            conn = get_db()
+            if conn:
+                try:
+                    cursor = conn.cursor(pymysql.cursors.DictCursor)
+                    cursor.execute(
+                        "SELECT openid, phone, user_type, keep_history "
+                        "FROM wechat_users WHERE user_type IN ('admin', 'boss', 'engineer') "
+                        "ORDER BY FIELD(user_type, 'admin', 'boss', 'engineer')"
+                    )
+                    users = cursor.fetchall()
+                    cursor.close()
+                    conn.close()
+                    if not users:
+                        reply = "当前没有已设置角色的用户。"
+                    else:
+                        lines = []
+                        role_names = {"admin": "管理员", "boss": "老板", "engineer": "工程师"}
+                        for u in users:
+                            rn = role_names.get(u["user_type"], u["user_type"])
+                            phone_disp = f"{u['phone'][:3]}****{u['phone'][-4:]}" if u["phone"] else "未绑定"
+                            lines.append(f"▪ {rn} — {phone_disp}")
+                        reply = "👥 **已设置的角色列表**\n" + "\n".join(lines)
+                except Exception as e:
+                    logger.error(f"查询角色列表失败: {e}")
+                    reply = "查询失败，请稍后再试。"
+            else:
+                reply = "数据库连接失败，请稍后再试。"
+        save_chat_log(from_user, "assistant", reply)
+        xml = build_xml_reply(from_user, to_user, reply)
+        return make_response(xml, 200,
+                             {"Content-Type": "application/xml; charset=utf-8"})
+
     # ---- AI 智能回复 ----
     reply = process_with_ai(content, from_user)
+    save_chat_log(from_user, "assistant", reply)
     xml = build_xml_reply(from_user, to_user, reply)
     return make_response(xml, 200,
                          {"Content-Type": "application/xml; charset=utf-8"})
