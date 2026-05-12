@@ -18,8 +18,10 @@ import xml.etree.ElementTree as ET
 import time
 import json
 import logging
+import os
+import sys
 import re
-import threading
+import subprocess
 
 import pymysql
 import requests
@@ -1050,20 +1052,17 @@ def wechat():
     save_chat_log(from_user, "assistant", hold_reply)
     xml = build_xml_reply(from_user, to_user, hold_reply)
 
-    # 后台单次完整调用DeepSeek（30秒超时），完成后客服消息推送
-    def background_ai(openid, msg):
+    # 后台独立进程调用DeepSeek（不受gunicorn worker生命周期影响）
+    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "background_ai.py")
+    if os.path.exists(script_path):
         try:
-            reply = process_with_ai(msg, openid, timeout=30)
-            if reply:
-                push_custom_message(openid, reply)
-            else:
-                push_custom_message(openid, "抱歉，AI暂时无法回复，请联系李工：15757807400")
+            subprocess.Popen(
+                [sys.executable, script_path, from_user, content],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
         except Exception as e:
-            logger.error(f"后台AI回复异常: {e}")
-
-    t = threading.Thread(target=background_ai, args=(from_user, content))
-    t.daemon = True
-    t.start()
+            logger.error(f"启动后台AI进程失败: {e}")
 
     return make_response(xml, 200,
                          {"Content-Type": "application/xml; charset=utf-8"})
