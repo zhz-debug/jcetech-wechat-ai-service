@@ -743,13 +743,60 @@ def process_with_ai(user_message, openid, timeout=30, return_none_on_error=False
 # ============================================================
 
 def _background_ai_reply(openid, content):
-    """后台线程：调用DeepSeek（30秒超时）并推送客服消息"""
+    """后台线程：调用DeepSeek（30秒超时）并推送客服消息
+    每一步写MySQL调试日志，用于远程诊断
+    """
+    import datetime as _dt
+
+    # 确保调试日志表存在
+    _create_table_conn = get_db()
+    if _create_table_conn:
+        try:
+            _c = _create_table_conn.cursor()
+            _c.execute("""
+                CREATE TABLE IF NOT EXISTS ai_thread_logs (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    openid VARCHAR(64) DEFAULT '',
+                    step VARCHAR(64) DEFAULT '',
+                    detail TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    KEY idx_openid (openid),
+                    KEY idx_created (created_at)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """)
+            _create_table_conn.commit()
+            _c.close()
+            _create_table_conn.close()
+        except:
+            _create_table_conn.close()
+
+    def _log(step, detail=""):
+        """写调试日志到MySQL，同时输出到logger"""
+        ts = _dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        line = f"[{ts}] [{step}] {detail}"
+        logger.info(f"[BG_AI] {line}")
+        try:
+            conn2 = get_db()
+            if conn2:
+                c = conn2.cursor()
+                c.execute(
+                    "INSERT INTO ai_thread_logs (openid, step, detail) VALUES (%s, %s, %s)",
+                    (openid or "unknown", step, (detail or "")[:600])
+                )
+                conn2.commit()
+                c.close()
+                conn2.close()
+        except:
+            pass
+
     try:
-        logger.info(f"后台AI线程开始: openid={openid[:20]}... msg={content[:50]}")
+        _log("THREAD_START", f"msg={content[:80] if content else '空'}")
+
         reply = process_with_ai(content, openid, timeout=30, return_none_on_error=True)
+        _log("PROCESS_RESULT", f"reply={'有' if reply else '空'}({len(reply) if reply else 0}字)")
 
         if not reply:
-            logger.warning(f"后台AI线程返回空: openid={openid[:20]}...")
+            _log("SKIP_EMPTY", "process_with_ai返回空")
             return
 
         # 更新数据库中的占位记录
@@ -763,21 +810,24 @@ def _background_ai_reply(openid, content):
                     "ORDER BY id DESC LIMIT 1",
                     (reply, openid)
                 )
+                affected = cursor.rowcount
                 conn.commit()
                 cursor.close()
                 conn.close()
+                _log("DB_UPDATE", f"更新{affected}条占位记录")
             except Exception as e:
-                logger.error(f"后台AI线程更新DB失败: {e}")
+                _log("DB_UPDATE_FAIL", str(e))
                 try:
                     conn.close()
                 except:
                     pass
 
         # 通过客服消息API推送
+        _log("PUSH_START", "准备推送客服消息")
         success = push_custom_message(openid, reply)
-        logger.info(f"后台AI线程推送{'成功' if success else '失败'}: "
-                     f"openid={openid[:20]}... 回复={reply[:80]}...")
+        _log("PUSH_DONE", f"{'成功' if success else '失败'}")
     except Exception as e:
+        _log("THREAD_EXCEPTION", f"{e}")
         logger.error(f"后台AI线程异常: {e}", exc_info=True)
 
 
@@ -790,6 +840,16 @@ def _background_ai_reply(openid, content):
 def wechat():
     # GET：服务器验证
     if request.method == "GET":
+        # 添加调试入口
+        if request.args.get("debug") == "1":
+            import subprocess as _sp
+            try:
+                git_hash = _sp.run(["git", "rev-parse", "--short", "HEAD"],
+                                   capture_output=True, text=True, timeout=3).stdout.strip()
+            except:
+                git_hash = "unknown"
+            return f"OK: git={git_hash} threaded=True minNum=1"
+        
         signature = request.args.get("signature", "")
         timestamp = request.args.get("timestamp", "")
         nonce = request.args.get("nonce", "")
