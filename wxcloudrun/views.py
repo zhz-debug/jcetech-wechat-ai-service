@@ -59,7 +59,7 @@ def get_wechat_access_token():
         return None
     try:
         url = f"https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid={WECHAT_APPID}&secret={WECHAT_APPSECRET}"
-        resp = requests.get(url, timeout=10)
+        resp = requests.get(url, timeout=10, verify=certifi.where())
         data = resp.json()
         if "access_token" in data:
             _wechat_token_cache = {
@@ -86,7 +86,7 @@ def push_custom_message(openid, content):
             "msgtype": "text",
             "text": {"content": content}
         }
-        resp = requests.post(url, json=payload, timeout=10)
+        resp = requests.post(url, json=payload, timeout=10, verify=certifi.where())
         data = resp.json()
         if data.get("errcode") == 0:
             return True
@@ -544,7 +544,8 @@ def call_deepseek(messages, timeout=30):
                 "max_tokens": 1024,
                 "temperature": 0.7,
             },
-            timeout=timeout
+            timeout=timeout,
+            verify=certifi.where()
         )
         if resp.status_code == 200:
             return resp.json()["choices"][0]["message"]["content"]
