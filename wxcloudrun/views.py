@@ -19,6 +19,7 @@ import time
 import json
 import logging
 import re
+import threading
 
 import pymysql
 import requests
@@ -34,6 +35,59 @@ WECHAT_TOKEN = app.config.get("WECHAT_TOKEN") or "jcetech2026"
 DEEPSEEK_API_KEY = app.config.get("DEEPSEEK_API_KEY") or ""
 DEEPSEEK_MODEL = app.config.get("DEEPSEEK_MODEL") or "deepseek-chat"
 DEEPSEEK_BASE_URL = app.config.get("DEEPSEEK_BASE_URL") or "https://api.deepseek.com/v1"
+
+# 微信客服消息推送
+WECHAT_APPID = app.config.get("WECHAT_APPID") or ""
+WECHAT_APPSECRET = app.config.get("WECHAT_APPSECRET") or ""
+_wechat_token_cache = {"token": "", "expires_at": 0}
+
+def get_wechat_access_token():
+    """获取微信全局 access_token（缓存到过期前5分钟）"""
+    global _wechat_token_cache
+    if time.time() < _wechat_token_cache["expires_at"] - 300:
+        return _wechat_token_cache["token"]
+    if not WECHAT_APPID or not WECHAT_APPSECRET:
+        logger.warning("微信APPID或APPSECRET未配置，无法推送客服消息")
+        return None
+    try:
+        url = f"https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid={WECHAT_APPID}&secret={WECHAT_APPSECRET}"
+        resp = requests.get(url, timeout=10)
+        data = resp.json()
+        if "access_token" in data:
+            _wechat_token_cache = {
+                "token": data["access_token"],
+                "expires_at": time.time() + data.get("expires_in", 7200)
+            }
+            return data["access_token"]
+        else:
+            logger.error(f"获取access_token失败: {data}")
+            return None
+    except Exception as e:
+        logger.error(f"获取access_token异常: {e}")
+        return None
+
+def push_custom_message(openid, content):
+    """通过微信客服消息API主动推送消息给用户"""
+    token = get_wechat_access_token()
+    if not token:
+        return False
+    try:
+        url = f"https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token={token}"
+        payload = {
+            "touser": openid,
+            "msgtype": "text",
+            "text": {"content": content}
+        }
+        resp = requests.post(url, json=payload, timeout=10)
+        data = resp.json()
+        if data.get("errcode") == 0:
+            return True
+        else:
+            logger.error(f"推送客服消息失败: {data}")
+            return False
+    except Exception as e:
+        logger.error(f"推送客服消息异常: {e}")
+        return False
 
 # MySQL 连接（腾讯云服务器公网端口）
 DB_HOST = app.config.get("DB_HOST") or "101.43.85.171"
@@ -967,9 +1021,48 @@ def wechat():
         return make_response(xml, 200,
                              {"Content-Type": "application/xml; charset=utf-8"})
 
-    # ---- AI 智能回复 ----
-    reply = process_with_ai(content, from_user)
-    save_chat_log(from_user, "assistant", reply)
-    xml = build_xml_reply(from_user, to_user, reply)
+    # ---- AI 智能回复（异步推送） ----
+    # 先秒回占位消息，避免微信5秒超时断开
+    hold_reply = "🔍 正在分析您的问题，请稍候..."
+    save_chat_log(from_user, "assistant", hold_reply)
+    xml = build_xml_reply(from_user, to_user, hold_reply)
+
+    # 后台线程异步调DeepSeek，完成后通过客服消息API推送给用户
+    def async_ai_reply(openid, msg, to_user_openid):
+        try:
+            reply = process_with_ai(msg, openid)
+            if reply:
+                # 更新数据库中的占位消息为真实回复
+                conn = get_db()
+                if conn:
+                    try:
+                        cursor = conn.cursor()
+                        cursor.execute(
+                            "UPDATE ai_chat_logs SET content = %s "
+                            "WHERE openid = %s AND role = 'assistant' "
+                            "AND content = '🔍 正在分析您的问题，请稍候...' "
+                            "ORDER BY id DESC LIMIT 1",
+                            (reply, openid)
+                        )
+                        conn.commit()
+                        cursor.close()
+                        conn.close()
+                    except Exception as e:
+                        logger.error(f"更新异步回复失败: {e}")
+                        if conn: conn.close()
+                # 通过客服消息API主动推送给用户
+                push_custom_message(openid, reply)
+            else:
+                push_custom_message(openid, "抱歉，AI暂时无法回复，请联系李工：15757807400")
+        except Exception as e:
+            logger.error(f"异步AI回复异常: {e}")
+
+    thread = threading.Thread(
+        target=async_ai_reply,
+        args=(from_user, content, to_user)
+    )
+    thread.daemon = True
+    thread.start()
+
     return make_response(xml, 200,
                          {"Content-Type": "application/xml; charset=utf-8"})

@@ -5,6 +5,8 @@ DEBUG = os.environ.get("DEBUG", "false").lower() == "true"
 
 # 微信配置
 WECHAT_TOKEN = os.environ.get("WECHAT_TOKEN", "jcetech2026")
+WECHAT_APPID = os.environ.get("WECHAT_APPID", "wx82fb025a766abe97")
+WECHAT_APPSECRET = os.environ.get("WECHAT_APPSECRET", "613cdc4a91fc18dbcecd48d68542eb33")
 
 # DeepSeek AI 配置
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
