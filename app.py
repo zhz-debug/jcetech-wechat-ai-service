@@ -21,6 +21,10 @@ import json
 import logging
 import re
 import pymysql
+import urllib3
+
+# 云托管容器CA证书不全，全局跳过SSL警告
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 import requests
 from flask import Flask, request, make_response
@@ -484,10 +488,11 @@ def call_deepseek(messages):
             json={
                 "model": DEEPSEEK_MODEL,
                 "messages": messages,
-                "max_tokens": 1024,
-                "temperature": 0.7,
+                'max_tokens': 800,
+                'temperature': 0.7,
             },
-            timeout=30
+            timeout=30,
+            verify=False
         )
         if resp.status_code == 200:
             return resp.json()["choices"][0]["message"]["content"]
@@ -551,7 +556,10 @@ def process_with_ai(user_message, openid):
     # 保存用户消息
     save_chat_message(openid, "user", user_message)
 
-    messages.append({"role": "user", "content": user_message})
+    # 追加字数限制到用户消息（微信被动回复/客服消息 字节限制：2048字节 ≈ 680个中文字）
+    # 让AI主动控制篇幅，避免被微信拦截或截断
+    limited_msg = user_message + '\n\n【重要】请回复控制在500个字符以内（小于150个中文字），超长内容会被微信拦截无法发送。请简明扼要。'
+    messages.append({"role": "user", "content": limited_msg})
 
     reply = call_deepseek(messages)
     if not reply:
