@@ -52,6 +52,12 @@ CHAT_HISTORY_ROUNDS = int(app.config.get("CHAT_HISTORY_ROUNDS") or 25)
 # 滥用检测：连续 N 条非工作消息触发提醒（0=关闭）
 ABUSE_TRIGGER_COUNT = int(app.config.get("ABUSE_TRIGGER_COUNT") or 10)
 
+# 聊天记录自动清理天数（默认30天，标记了 keep_history 的用户不受影响）
+CHAT_RETENTION_DAYS = int(app.config.get("CHAT_RETENTION_DAYS") or 30)
+
+# 上次清理时间（用于每日限频一次）
+_last_cleanup_date = None
+
 # ============================================================
 # 日志
 # ============================================================
@@ -732,6 +738,16 @@ def wechat():
         xml = build_xml_reply(from_user, to_user, reply)
         return make_response(xml, 200,
                              {"Content-Type": "application/xml; charset=utf-8"})
+
+    # 每日一次自动清理过期聊天记录（支持 keep_history 豁免）
+    global _last_cleanup_date
+    today = time.strftime("%Y-%m-%d")
+    if _last_cleanup_date != today:
+        _last_cleanup_date = today
+        try:
+            cleanup_old_chats(days=CHAT_RETENTION_DAYS)
+        except Exception as e:
+            logger.error(f"自动清理失败: {e}")
 
     # 确保用户在 wechat_users 表中有记录
     ensure_user_exists(from_user)

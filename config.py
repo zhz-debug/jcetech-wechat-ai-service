@@ -26,3 +26,6 @@ CHAT_HISTORY_ROUNDS = int(os.environ.get("CHAT_HISTORY_ROUNDS", "25"))
 
 # 滥用检测：连续多少条非工作消息触发提醒（0=关闭）
 ABUSE_TRIGGER_COUNT = int(os.environ.get("ABUSE_TRIGGER_COUNT", "10"))
+
+# 聊天记录自动清理天数（默认30天）
+CHAT_RETENTION_DAYS = int(os.environ.get("CHAT_RETENTION_DAYS", "30"))
