@@ -9,26 +9,35 @@ import os
 import json
 import traceback
 
-# 日志文件
+# 日志（同时写文件 + 标准错误输出到云托管控制台）
 LOG_FILE = "/tmp/background_ai.log"
 
 def log(msg):
+    timestamp = __import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    line = f"[{timestamp}] {msg}"
     try:
         with open(LOG_FILE, "a") as f:
-            f.write(f"{msg}\n")
+            f.write(f"{line}\n")
     except:
         pass
+    # 输出到stderr → 显示在云托管日志中
+    print(line, file=__import__('sys').stderr, flush=True)
 
-log(f"=== 后台AI启动: openid={sys.argv[1][:10]}...")
+log(f"=== 后台AI启动 args={sys.argv} len={len(sys.argv)}")
+log(f"Python可执行路径: {sys.executable}")
+log(f"工作目录: {os.getcwd()}")
+log(f"PATH环境变量: {os.environ.get('PATH', 'N/A')[:200]}")
 
 try:
     import requests
+    log("✓ requests导入成功")
 except Exception as e:
-    log(f"导入requests失败: {e}")
+    log(f"✗ 导入requests失败: {e}")
     sys.exit(1)
 
 openid = sys.argv[1]
 msg = sys.argv[2]
+log(f"openid={openid[:15]}... msg前50字={msg[:50]}")
 
 # 读取配置
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -36,9 +45,12 @@ try:
     from config import (DEEPSEEK_API_KEY, DEEPSEEK_MODEL, DEEPSEEK_BASE_URL,
         DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME,
         WECHAT_APPID, WECHAT_APPSECRET)
-    log(f"config: KEY={'有' if DEEPSEEK_API_KEY else '空'}, MODEL={DEEPSEEK_MODEL}")
+    log(f"config: KEY={'有' if DEEPSEEK_API_KEY else '空'}(前5={DEEPSEEK_API_KEY[:5]}), MODEL={DEEPSEEK_MODEL}")
+    log(f"config: DB_HOST={DB_HOST}:{DB_PORT} DB_USER={DB_USER}")
+    log(f"config: WECHAT_APPID={'有' if WECHAT_APPID else '空'}({WECHAT_APPID[:10]}...) APPSECRET={'有' if WECHAT_APPSECRET else '空'}")
 except Exception as e:
-    log(f"导入config失败: {e}")
+    log(f"✗ 导入config失败: {e}")
+    log(traceback.format_exc())
     sys.exit(1)
 
 def get_db():
@@ -122,15 +134,14 @@ def call_deepseek():
 def push_result(content):
     """通过微信客服消息API推送"""
     if not WECHAT_APPID or not WECHAT_APPSECRET:
-        log("微信APPID或APPSECRET为空")
+        log(f"✗ 微信APPID或APPSECRET为空: appid={'有' if WECHAT_APPID else '空'} secret={'有' if WECHAT_APPSECRET else '空'}")
         return
     try:
         # 获取access_token
         log("获取access_token...")
-        r = requests.get(
-            f"https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid={WECHAT_APPID}&secret={WECHAT_APPSECRET}",
-            timeout=10
-        )
+        secret_url = f"https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid={WECHAT_APPID}&secret={WECHAT_APPSECRET}"
+        log(f"请求token URL(secret掩码): {secret_url[:60]}...{secret_url[-10:]}")
+        r = requests.get(secret_url, timeout=10)
         data = r.json()
         token = data.get("access_token")
         if not token:
