@@ -26,7 +26,12 @@ import threading
 
 import pymysql
 import requests
+import certifi
 from flask import request, make_response
+
+# 全局使用 certifi 的 CA 证书包（解决容器内SSL证书不全问题）
+os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
+os.environ['SSL_CERT_FILE'] = certifi.where()
 
 from run import app
 
@@ -804,19 +809,24 @@ def _background_ai_reply(openid, content):
         if conn:
             try:
                 cursor = conn.cursor()
-                cursor.execute(
-                    "UPDATE ai_chat_logs SET content=%s WHERE openid=%s "
-                    "AND role='assistant' AND content LIKE '🔍 正在分析%%' "
-                    "ORDER BY id DESC LIMIT 1",
-                    (reply, openid)
+                # pymysql的cursor.execute内部使用Python%格式化解析SQL，
+                # 若AI回复含%字符会导致格式错误。故用escape_string()手动转义。
+                safe_reply = pymysql.converters.escape_string(reply)
+                safe_openid = pymysql.converters.escape_string(openid)
+                sql = (
+                    "UPDATE ai_chat_logs SET content='" + safe_reply + "'"
+                    " WHERE openid='" + safe_openid + "'"
+                    " AND role='assistant' AND content LIKE '🔍 正在分析%'"
+                    " ORDER BY id DESC LIMIT 1"
                 )
+                cursor.execute(sql)
                 affected = cursor.rowcount
                 conn.commit()
                 cursor.close()
                 conn.close()
                 _log("DB_UPDATE", f"更新{affected}条占位记录")
             except Exception as e:
-                _log("DB_UPDATE_FAIL", str(e))
+                _log("DB_UPDATE_FAIL", f"{e}")
                 try:
                     conn.close()
                 except:
