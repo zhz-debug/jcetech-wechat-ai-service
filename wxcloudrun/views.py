@@ -86,7 +86,10 @@ def push_custom_message(openid, content):
             "msgtype": "text",
             "text": {"content": content}
         }
-        resp = requests.post(url, json=payload, timeout=10, verify=False)
+        # 必须 ensure_ascii=False，否则微信不认 \\uXXXX 转义
+        body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+        resp = requests.post(url, data=body, timeout=10, verify=False,
+                             headers={"Content-Type": "application/json; charset=utf-8"})
         data = resp.json()
         if data.get("errcode") == 0:
             return True
