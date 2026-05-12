@@ -657,7 +657,13 @@ def wechat():
                      "✅ 雷尼绍 · 马波斯 · 波龙 全品牌覆盖\n\n"
                      "💬 直接发送故障描述即可在线报修\n"
                      "📱 发送「查进度」查询工单状态\n"
-                     "📞 李工：15757807400")
+                     "📞 李工：15757807400\n\n"
+                     "━━━━━━━━━━━━━━━━━━━\n"
+                     "🔒 **隐私提示**\n"
+                     "您与本公众号的对话内容将被记录，"
+                     "用于为您提供报修、进度查询等服务。"
+                     "我们不会将您的信息用于其他用途。"
+                     "如您介意，可随时发送「删除我的记录」要求清除。")
         elif event == "CLICK":
             event_key = msg.get("EventKey", "")
 
@@ -759,6 +765,27 @@ def wechat():
                     f"   时间：{o['created_at']}"
                 )
             reply = "\n".join(lines)
+        xml = build_xml_reply(from_user, to_user, reply)
+        return make_response(xml, 200,
+                             {"Content-Type": "application/xml; charset=utf-8"})
+
+    # ---- 指令：删除我的记录 ----
+    if c in ("删除我的记录", "删除我的记录。"):
+        conn = get_db()
+        if conn:
+            try:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM ai_chat_logs WHERE openid = %s", (from_user,))
+                deleted = cursor.rowcount
+                conn.commit()
+                cursor.close()
+                conn.close()
+                reply = f"✅ 已为您删除 {deleted} 条对话记录，感谢您的信任。"
+            except Exception as e:
+                logger.error(f"删除记录失败: {e}")
+                reply = "删除失败，请稍后再试。"
+        else:
+            reply = "数据库连接失败，请稍后再试。"
         xml = build_xml_reply(from_user, to_user, reply)
         return make_response(xml, 200,
                              {"Content-Type": "application/xml; charset=utf-8"})
