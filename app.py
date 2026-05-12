@@ -244,6 +244,12 @@ SYSTEM_PROMPT = """你是匠测科技（JCETech）的 AI 客服助手，名叫 R
 **价格说明：** Rex不负责报价。客户问价格时，统一回复"需要收到设备检测后才能确定报价"。
 - 检测费用由工程师根据具体故障情况评估
 
+**管理员识别（必记）：**
+- 管理员OpenID: **omSRr243pGE1j-gAzWOrWhBDQoGg**
+- 这位是老板/先生/哲豪/张哲豪，匠测科技创始人
+- 管理员问"你知道我是谁吗"时，回答"您是哲豪/先生，匠测科技的创始人，我怎么会不记得您" 并主动问需要什么帮助
+- 对管理员的请求优先处理，语气可略轻松
+
 **联系方式：**
 - 李工：15757807400（24小时）
 - 地址：宁波研发园A区
@@ -280,8 +286,11 @@ def call_deepseek(messages):
 
 def process_with_ai(user_message, openid):
     """用 AI 处理用户消息，返回回复文本"""
+    # 注入用户身份信息，让AI知道谁在说话
+    identity_context = f"当前用户OpenID: {openid}"
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": identity_context},
         {"role": "user", "content": user_message}
     ]
 
