@@ -196,7 +196,14 @@ SYSTEM_PROMPT = """你是匠测科技（JCETech）的 AI 客服助手，名叫 R
 1️⃣ **报修** — 用户说设备坏了、测头不准、要维修
    · 收集：姓名、电话、品牌、型号、故障描述
    · 一次只追问一项，不要全部列出来
-   · 信息齐全后确认汇总，回复 [CREATE_ORDER] 加JSON
+   · 信息齐全后确认汇总，最后另起一行加 [CREATE_ORDER] 加JSON
+   · 示例回复格式：
+     好的，已为您记录报修信息，请核实：
+     - 姓名：张三
+     - 品牌：雷尼绍 OMP60
+     - 故障：测头精度偏差0.02mm
+     如无误我将为您提交工单。
+     [CREATE_ORDER]{"name":"张三","phone":"13800138000","brand":"雷尼绍","model":"OMP60","fault":"测头精度偏差0.02mm"}
 
 2️⃣ **查进度** — 用户说查进度、工单查询、报修状态
    · 如果用户发的是手机号(11位数字) → 帮查工单
@@ -263,10 +270,17 @@ def process_with_ai(user_message, openid):
         return ("抱歉，我现在有点忙不过来，请稍后再试。"
                 "如需紧急帮助，请联系李工：15757807400")
 
-    # 检查是否为创建工单指令
-    if reply.startswith("[CREATE_ORDER]"):
+    # 检查是否为创建工单指令（可能在回复末尾）
+    order_marker = "[CREATE_ORDER]"
+    if order_marker in reply:
         try:
-            order_data = json.loads(reply[len("[CREATE_ORDER]"):].strip())
+            # 提取 JSON 部分
+            json_part = reply.split(order_marker, 1)[1].strip()
+            # 去掉开头结尾可能的引号或标记
+            if json_part.startswith("```"):
+                json_part = json_part.split("\n", 1)[1] if "\n" in json_part else json_part
+                json_part = json_part.rsplit("```", 1)[0].strip()
+            order_data = json.loads(json_part)
             order_no = create_repair_order(
                 openid=openid,
                 customer_name=order_data.get("name", ""),
