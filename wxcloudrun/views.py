@@ -508,8 +508,8 @@ SYSTEM_PROMPT = """你是匠测科技（JCETech）的 AI 客服助手，名叫 *
 用中文回复，语气专业但友好。"""
 
 
-def call_deepseek(messages):
-    """调用 DeepSeek API"""
+def call_deepseek(messages, timeout=30):
+    """调用 DeepSeek API（支持自定义超时，用于轮询）"""
     if not DEEPSEEK_API_KEY:
         return None
     try:
@@ -525,7 +525,7 @@ def call_deepseek(messages):
                 "max_tokens": 1024,
                 "temperature": 0.7,
             },
-            timeout=30
+            timeout=timeout
         )
         if resp.status_code == 200:
             return resp.json()["choices"][0]["message"]["content"]
@@ -537,8 +537,8 @@ def call_deepseek(messages):
         return None
 
 
-def process_with_ai(user_message, openid):
-    """用 AI 处理用户消息，返回回复文本"""
+def process_with_ai(user_message, openid, timeout=30):
+    """用 AI 处理用户消息，返回回复文本（支持自定义超时，用于轮询）"""
     history_count = CHAT_HISTORY_ROUNDS * 2
     history = get_recent_chats(openid, limit=history_count)
 
@@ -586,7 +586,7 @@ def process_with_ai(user_message, openid):
 
     messages.append({"role": "user", "content": user_message})
 
-    reply = call_deepseek(messages)
+    reply = call_deepseek(messages, timeout=timeout)
     if not reply:
         return ("抱歉，我现在有点忙不过来，请稍后再试。"
                 "如需紧急帮助，请联系李工：15757807400")
@@ -1021,45 +1021,63 @@ def wechat():
         return make_response(xml, 200,
                              {"Content-Type": "application/xml; charset=utf-8"})
 
-    # ---- AI 智能回复（异步推送） ----
+    # ---- AI 智能回复（轮询推送） ----
     # 先秒回占位消息，避免微信5秒超时断开
     hold_reply = "🔍 正在分析您的问题，请稍候..."
     save_chat_log(from_user, "assistant", hold_reply)
     xml = build_xml_reply(from_user, to_user, hold_reply)
 
-    # 后台线程异步调DeepSeek，完成后通过客服消息API推送给用户
-    def async_ai_reply(openid, msg, to_user_openid):
+    # 后台线程：每2.5秒轮询DeepSeek，同时推送keepalive，直到出结果
+    def poll_ai_reply(openid, msg):
         try:
-            reply = process_with_ai(msg, openid)
-            if reply:
-                # 更新数据库中的占位消息为真实回复
-                conn = get_db()
-                if conn:
-                    try:
-                        cursor = conn.cursor()
-                        cursor.execute(
-                            "UPDATE ai_chat_logs SET content = %s "
-                            "WHERE openid = %s AND role = 'assistant' "
-                            "AND content = '🔍 正在分析您的问题，请稍候...' "
-                            "ORDER BY id DESC LIMIT 1",
-                            (reply, openid)
-                        )
-                        conn.commit()
-                        cursor.close()
-                        conn.close()
-                    except Exception as e:
-                        logger.error(f"更新异步回复失败: {e}")
-                        if conn: conn.close()
-                # 通过客服消息API主动推送给用户
-                push_custom_message(openid, reply)
-            else:
-                push_custom_message(openid, "抱歉，AI暂时无法回复，请联系李工：15757807400")
+            max_retries = 10
+            for attempt in range(1, max_retries + 1):
+                # 快速尝试DeepSeek（3秒超时，超时则下一轮继续）
+                reply = process_with_ai(msg, openid, timeout=3)
+                if reply:
+                    # 成功了！推送最终答案
+                    push_custom_message(openid, reply)
+                    # 更新数据库占位记录
+                    conn = get_db()
+                    if conn:
+                        try:
+                            cursor = conn.cursor()
+                            cursor.execute(
+                                "UPDATE ai_chat_logs SET content = %s "
+                                "WHERE openid = %s AND role = 'assistant' "
+                                "AND content = '🔍 正在分析您的问题，请稍候...' "
+                                "ORDER BY id DESC LIMIT 1",
+                                (reply, openid)
+                            )
+                            conn.commit()
+                            cursor.close()
+                        except Exception as e:
+                            logger.error(f"更新回复记录失败: {e}")
+                        finally:
+                            conn.close()
+                    return
+                else:
+                    # 没出结果，发keepalive
+                    if attempt <= 5:
+                        msg_text = "⏳ 正在分析您的问题，请稍候..."
+                    elif attempt <= 8:
+                        msg_text = "⏳ 问题较复杂，我再分析一会..."
+                    else:
+                        msg_text = "⏳ 快好了，再等一下..."
+                    push_custom_message(openid, msg_text)
+                    time.sleep(2.5)
+            # 所有重试用完仍失败
+            push_custom_message(openid, "抱歉，AI暂时无法回复，请联系李工：15757807400")
         except Exception as e:
-            logger.error(f"异步AI回复异常: {e}")
+            logger.error(f"轮询AI回复异常: {e}")
+            try:
+                push_custom_message(openid, "抱歉，处理异常，请联系李工：15757807400")
+            except:
+                pass
 
     thread = threading.Thread(
-        target=async_ai_reply,
-        args=(from_user, content, to_user)
+        target=poll_ai_reply,
+        args=(from_user, content)
     )
     thread.daemon = True
     thread.start()
