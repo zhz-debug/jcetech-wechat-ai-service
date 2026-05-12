@@ -90,13 +90,23 @@ else:
 
 checks_map = [
     ("客服消息推送接口", "push_custom_message"),
-    ("后台单次AI调用(30s)", "background_ai"),
+    ("后台单次AI调用(s)", "background_ai"),
     ("快速调用(4s优先)", "fast_reply = process_with_ai"),
     ("轮询超时空值保护", "return_none_on_error"),
     ("品牌中立定位声明", "第三方技术服务商"),
     ("对比免责声明", "未经验证"),
     ("SQL参数化查询(%s)", "cursor.execute.*%s"),
 ]
+
+# 检查所有 process_with_ai 调用是否都带了 return_none_on_error
+process_calls = re.findall(r'process_with_ai\([^)]*\)', views)
+for call in process_calls:
+    if "def process_with_ai" in call:
+        continue  # 函数定义，跳过
+    if "return_none_on_error" in call:
+        check(f"process_with_ai 调用带保护: {call[:60]}...", True)
+    else:
+        check(f"process_with_ai 调用带保护", False, f"漏了 return_none_on_error! {call[:80]}")
 for label, pattern in checks_map:
     if re.search(pattern, views):
         check(label, True)
