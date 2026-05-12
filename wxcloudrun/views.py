@@ -1039,7 +1039,7 @@ def wechat():
 
     # ---- AI 智能回复（快速+后台双轨） ----
     # 先尝试4秒快速调用（微信5秒窗口内）
-    fast_reply = process_with_ai(content, from_user, timeout=4)
+    fast_reply = process_with_ai(content, from_user, timeout=4, return_none_on_error=True)
     if fast_reply:
         # 4秒内出结果了，直接同步返回
         save_chat_log(from_user, "assistant", fast_reply)
