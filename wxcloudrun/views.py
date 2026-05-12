@@ -305,6 +305,60 @@ def process_with_ai(user_message, openid):
             logger.error(f"解析工单数据失败: {e}")
             return "抱歉，处理您的报修信息时出错，请联系李工：15757807400"
 
+    # 检查是否为查进度请求
+    phone_marker = "[QUERY_PHONE:"
+    order_query_marker = "[QUERY_ORDER:"
+    if phone_marker in reply:
+        try:
+            phone = reply.split(phone_marker, 1)[1].split("]", 1)[0].strip()
+            orders = query_orders_by_phone(phone)
+            if orders is None:
+                return "查询失败，请稍后再试。"
+            elif not orders:
+                return f"手机号 {phone[:3]}****{phone[-4:]} 暂无报修记录。"
+            else:
+                lines = [f"📋 共 {len(orders)} 个工单："]
+                for o in orders:
+                    status = STATUS_TEXT.get(o["status"], o["status"])
+                    lines.append(
+                        f"\n🔹 {o['order_no']}\n"
+                        f"   {o['brand']} {o['model']}\n"
+                        f"   状态：{status}\n"
+                        f"   时间：{o['created_at']}"
+                    )
+                return "\n".join(lines)
+        except Exception as e:
+            logger.error(f"解析查号请求失败: {e}")
+            return "查询失败，请稍后再试。"
+
+    if order_query_marker in reply:
+        try:
+            order_no = reply.split(order_query_marker, 1)[1].split("]", 1)[0].strip()
+            conn = get_db()
+            if not conn:
+                return "查询失败，请稍后再试。"
+            cursor = conn.cursor(pymysql.cursors.DictCursor)
+            cursor.execute(
+                "SELECT order_no, brand, model, fault_description, status, "
+                "DATE_FORMAT(created_at, '%%Y-%%m-%%d %%H:%%i') as created_at "
+                "FROM repair_orders WHERE order_no = %s",
+                (order_no,)
+            )
+            o = cursor.fetchone()
+            cursor.close()
+            conn.close()
+            if not o:
+                return f"工单 {order_no} 未找到，请核对后重试。"
+            status = STATUS_TEXT.get(o["status"], o["status"])
+            return (f"📋 工单 {o['order_no']}\n"
+                    f"设备：{o['brand']} {o['model']}\n"
+                    f"故障：{o['fault_description']}\n"
+                    f"状态：{status}\n"
+                    f"时间：{o['created_at']}")
+        except Exception as e:
+            logger.error(f"解析查单号请求失败: {e}")
+            return "查询失败，请稍后再试。"
+
     return reply
 
 
